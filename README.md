@@ -58,3 +58,5 @@ python 1_raw_request.py
 python 3_prefix_cache.py
 python -m desk.bench --n 30
 ```
+
+Домашнее задание: [дз_1.md](дз_1.md).
