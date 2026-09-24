@@ -9,6 +9,7 @@
 проходят одни и те же обращения. Таблица печатается и сохраняется
 в runs/s1_bench.md
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,6 +40,19 @@ DETAILED = (
 - другое: всё остальное; при сомнении выбирай «другое»."""
 )
 
+ADDED_EXAMPLES = (
+    DETAILED
+    + """
+
+Примеры:
+1. Обращение: Можно узнать сколько мне еще ждать денег?? Я возврат оформила две недели назад.
+Категория: возвраты.
+
+2. Обращение: Потерял симку, сменил. Теперь совсем не даёт войти. Помогите.
+Категория: доступ
+    """
+)
+
 # Рассуждение. max_tokens кандидата должен быть больше budget_tokens
 THINKING = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
 
@@ -58,6 +72,7 @@ CANDIDATES = [
     Candidate("короткая постановка", SHORT),
     Candidate("постановка с правилами", DETAILED),
     Candidate("правила + рассуждение", DETAILED, body=THINKING, max_tokens=2048),
+    Candidate("постановка с примерами", ADDED_EXAMPLES),
 ]
 
 
@@ -162,7 +177,7 @@ def summarize(
 def table(rows: List[Dict[str, Any]]) -> str:
     """Таблица в формате Markdown"""
     heads = list(rows[0])
-    fmt = lambda v: ("%.3f" % v if isinstance(v, float) else str(v))
+    fmt = lambda v: "%.3f" % v if isinstance(v, float) else str(v)
     lines = ["| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     lines += ["| " + " | ".join(fmt(r[h]) for h in heads) + " |" for r in rows]
     return "\n".join(lines)

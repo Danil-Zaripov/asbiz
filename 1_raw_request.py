@@ -11,7 +11,11 @@
 from __future__ import annotations
 
 import json
+<<<<<<< HEAD
 import time
+=======
+from time import sleep
+>>>>>>> 50fc8de (Complete task 1)
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -136,7 +140,11 @@ def main() -> None:
         )
 
     print("\n4. Разброс ответов: пять одинаковых запросов при температуре 0 и 1\n")
+    print("Ждем минуту :)")
+    sleep(60)
+
     prompt = user("Продолжи фразу одним словом, без точки: «Сегодня погода»")
+
     for temperature in (0.0, 1.0):
         answers = [
             text_of(call(body(cfg, prompt, max_tokens=8, temperature=temperature)))
@@ -148,6 +156,9 @@ def main() -> None:
         )
 
     print("\n5. Сервер не хранит диалог\n")
+
+    print("Ждем минуту :)")
+    sleep(60)
     first = user("Меня зовут Аня. Запомни это.")
     resp1 = call(body(cfg, first, max_tokens=40))
     alone = call(body(cfg, user("Как меня зовут? Ответь одним словом."), max_tokens=16))
@@ -166,6 +177,9 @@ def main() -> None:
     )
 
     print("\n6. Что будет, если модель начнёт рассуждать, а места мало\n")
+
+    print("Ждем минуту :)")
+    sleep(60)
     thinking = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
     resp = call(body(cfg, user(TICKET), system=SYSTEM, max_tokens=16, extra=thinking))
     kinds = [b["type"] for b in resp.get("content") or []]
