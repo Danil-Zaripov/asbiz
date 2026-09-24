@@ -59,6 +59,15 @@ THINKING = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
 # Обращений в день для прогноза на месяц
 FLOW_PER_DAY = 50_000
 
+# Размер пакета обращений
+BATCH_SIZE = 10
+
+# Пауза между пакетами одного кандидата
+BATCH_PAUSE_S = 60
+
+# Пауза между кандидатами
+CANDIDATE_PAUSE_S = 60
+
 
 @dataclass
 class Candidate:
@@ -108,18 +117,27 @@ def percentile(values: List[float], q: float) -> float:
     """Процентиль q списка значений"""
     if not values:
         return 0.0
+
     ordered = sorted(values)
     idx = max(0, min(len(ordered) - 1, int(-(-q * len(ordered) // 1)) - 1))
     return ordered[idx]
 
 
 async def run_candidate(
-    llm: Any, cand: Candidate, rows: List[Dict[str, Any]], concurrency: int = 4
+    llm: Any,
+    cand: Candidate,
+    rows: List[Dict[str, Any]],
+    concurrency: int = BATCH_SIZE,
+    batch_size: int = BATCH_SIZE,
+    pause_s: int = BATCH_PAUSE_S,
 ) -> List[Row]:
-    """Прогоняет обращения через кандидата, не больше concurrency сразу
+    """Прогоняет обращения пакетами.
+
+    Внутри одного пакета выполняется не больше concurrency обращений.
+    Между пакетами выдерживается пауза pause_s секунд.
 
     Если вызов не удался, обращение засчитывается как ошибка,
-    и замер идёт дальше
+    и замер идёт дальше.
     """
     client = llm.variant(extra_body={**llm.cfg.extra_body, **cand.body})
     gate = asyncio.Semaphore(concurrency)
@@ -128,10 +146,12 @@ async def run_candidate(
         async with gate:
             try:
                 res = await client.astream(
-                    prompt(cand, row), max_tokens=cand.max_tokens
+                    prompt(cand, row),
+                    max_tokens=cand.max_tokens,
                 )
             except LLMError:
                 return Row(row["id"], ok=False, failed=True)
+
         return Row(
             row["id"],
             parse_category(res.text) == row["gold"]["category"],
@@ -141,35 +161,58 @@ async def run_candidate(
             usage=res.usage,
         )
 
-    return list(await asyncio.gather(*(one(r) for r in rows)))
+    result: List[Row] = []
+
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start : start + batch_size]
+
+        # Обрабатываем только текущий пакет.
+        batch_results = await asyncio.gather(*(one(row) for row in batch))
+        result.extend(batch_results)
+
+        # Не ждём после последнего пакета этого кандидата.
+        if start + batch_size < len(rows):
+            print(
+                "Кандидат %s: пакет завершён, "
+                "следующий пакет через %d с." % (cand.name, pause_s)
+            )
+            await asyncio.sleep(pause_s)
+
+    return result
 
 
 def summarize(
-    name: str, rows: List[Row], flow_per_day: int = FLOW_PER_DAY
+    name: str,
+    rows: List[Row],
+    flow_per_day: int = FLOW_PER_DAY,
 ) -> Dict[str, Any]:
-    """Строка таблицы для кандидата
+    """Строка таблицы для кандидата.
 
-    Сбой считается ошибкой. Задержки и расход считаются по удачным вызовам
+    Сбой считается ошибкой. Задержки и расход считаются по удачным вызовам.
     """
-    done = [r for r in rows if not r.failed]
+    done = [row for row in rows if not row.failed]
+
     total = Usage()
-    for r in done:
-        total = total + r.usage
+    for row in done:
+        total = total + row.usage
+
     per = lambda value: value / max(1, len(done))
-    latencies = [r.latency_s for r in done]
-    ttfts = [r.ttft_s for r in done if r.ttft_s is not None]
+
+    latencies = [row.latency_s for row in done]
+    ttfts = [row.ttft_s for row in done if row.ttft_s is not None]
+
     return {
         "кандидат": name,
-        "точность": sum(r.ok for r in rows) / max(1, len(rows)),
+        "точность": sum(row.ok for row in rows) / max(1, len(rows)),
         "p50, с": percentile(latencies, 0.5),
         "p95, с": percentile(latencies, 0.95),
         "первый токен p50, с": percentile(ttfts, 0.5),
         "токенов на обращение": per(total.total_tokens),
         "взвешенных на обращение": per(total.weighted),
         "цена за 1000, у.е.": 1000 * per(total.cost),
-        "взвешенных в месяц, млн": per(total.weighted) * flow_per_day * 30 / 1e6,
+        "взвешенных в месяц, млн": (per(total.weighted) * flow_per_day * 30 / 1e6),
         "цена в месяц, у.е.": per(total.cost) * flow_per_day * 30,
-        "обрезано": sum(r.truncated for r in done),
+        "обрезано": sum(row.truncated for row in done),
         "сбоев": len(rows) - len(done),
     }
 
@@ -177,49 +220,125 @@ def summarize(
 def table(rows: List[Dict[str, Any]]) -> str:
     """Таблица в формате Markdown"""
     heads = list(rows[0])
-    fmt = lambda v: "%.3f" % v if isinstance(v, float) else str(v)
-    lines = ["| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
-    lines += ["| " + " | ".join(fmt(r[h]) for h in heads) + " |" for r in rows]
+
+    def fmt(value: Any) -> str:
+        return "%.3f" % value if isinstance(value, float) else str(value)
+
+    lines = [
+        "| " + " | ".join(heads) + " |",
+        "|" + "---|" * len(heads),
+    ]
+    lines += [
+        "| " + " | ".join(fmt(row[head]) for head in heads) + " |" for row in rows
+    ]
+
     return "\n".join(lines)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--n", type=int, default=30, help="сколько обращений из dev взять")
-    ap.add_argument("--only", default=None, help="имя одного кандидата")
-    ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument(
-        "--flow", type=int, default=FLOW_PER_DAY, help="обращений в день для прогноза"
+        "--n",
+        type=int,
+        default=30,
+        help="сколько обращений из dev взять",
+    )
+    ap.add_argument(
+        "--only",
+        default=None,
+        help="имя одного кандидата",
+    )
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=BATCH_SIZE,
+        help="сколько обращений одновременно выполнять внутри пакета",
+    )
+    ap.add_argument(
+        "--flow",
+        type=int,
+        default=FLOW_PER_DAY,
+        help="обращений в день для прогноза",
     )
     args = ap.parse_args()
+
     rows = tickets("dev", args.n)
-    llm = LLM(cache=False)  # задержку мерим без кэша
-    chosen = [c for c in CANDIDATES if args.only in (None, c.name)]
+    llm = LLM(cache=False)  # задержку меряем без кэша
+    chosen = [
+        candidate for candidate in CANDIDATES if args.only in (None, candidate.name)
+    ]
+
     started = time.time()
 
     async def run_all() -> List[List[Row]]:
-        return [
-            await run_candidate(llm, cand, rows, args.concurrency) for cand in chosen
-        ]
+        all_results: List[List[Row]] = []
 
-    results, spent = [], 0.0
-    for cand, done in zip(chosen, asyncio.run(run_all())):
-        spent += sum(r.usage.weighted for r in done)
-        results.append(summarize(cand.name, done, args.flow))
+        # Кандидаты запускаются строго последовательно.
+        for index, candidate in enumerate(chosen):
+            print("Запуск кандидата: %s" % candidate.name)
+
+            candidate_results = await run_candidate(
+                llm,
+                candidate,
+                rows,
+                concurrency=args.concurrency,
+                batch_size=BATCH_SIZE,
+                pause_s=BATCH_PAUSE_S,
+            )
+            all_results.append(candidate_results)
+
+            # Не ждём после последнего кандидата.
+            if index + 1 < len(chosen):
+                print(
+                    "Кандидат %s завершён, "
+                    "следующий кандидат через %d с."
+                    % (candidate.name, CANDIDATE_PAUSE_S)
+                )
+                await asyncio.sleep(CANDIDATE_PAUSE_S)
+
+        return all_results
+
+    results: List[Dict[str, Any]] = []
+    spent = 0.0
+
+    completed = asyncio.run(run_all())
+
+    for candidate, candidate_rows in zip(chosen, completed):
+        spent += sum(row.usage.weighted for row in candidate_rows)
+        results.append(
+            summarize(
+                candidate.name,
+                candidate_rows,
+                args.flow,
+            )
+        )
+
     report = table(results)
     print(report)
+
     footer = (
         "\nМодель %s, обращений %d, прогноз на %d обращений в день. "
         "Время замера %.0f с, потрачено взвешенных токенов: %.0f."
-        % (llm.cfg.model, len(rows), args.flow, time.time() - started, spent)
+        % (
+            llm.cfg.model,
+            len(rows),
+            args.flow,
+            time.time() - started,
+            spent,
+        )
     )
+
     print(footer)
+
     RUNS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
     (RUNS / "s1_bench.md").write_text(
-        "# Замер кандидатов, %s\n\n%s\n%s\n" % (stamp, report, footer), encoding="utf-8"
+        "# Замер кандидатов, %s\n\n%s\n%s\n" % (stamp, report, footer),
+        encoding="utf-8",
     )
 
 

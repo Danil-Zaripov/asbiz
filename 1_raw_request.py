@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from time import sleep
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -128,7 +129,11 @@ def main() -> None:
         )
 
     print("\n4. Разброс ответов: пять одинаковых запросов при температуре 0 и 1\n")
+    print("Ждем минуту :)")
+    sleep(60)
+
     prompt = user("Продолжи фразу одним словом, без точки: «Сегодня погода»")
+
     for temperature in (0.0, 1.0):
         answers = [
             text_of(send(cfg, body(cfg, prompt, max_tokens=8, temperature=temperature)))
@@ -140,6 +145,9 @@ def main() -> None:
         )
 
     print("\n5. Сервер не хранит диалог\n")
+
+    print("Ждем минуту :)")
+    sleep(60)
     first = user("Меня зовут Аня. Запомни это.")
     resp1 = send(cfg, body(cfg, first, max_tokens=40))
     alone = send(
@@ -160,6 +168,9 @@ def main() -> None:
     )
 
     print("\n6. Что будет, если модель начнёт рассуждать, а места мало\n")
+
+    print("Ждем минуту :)")
+    sleep(60)
     thinking = {"thinking": {"type": "enabled", "budget_tokens": 1024}}
     resp = send(
         cfg, body(cfg, user(TICKET), system=SYSTEM, max_tokens=16, extra=thinking)
